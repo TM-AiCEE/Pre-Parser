@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.Serialization;
@@ -28,27 +29,40 @@ namespace ParseUserLog
             };
             try
             {
-                foreach (string arg in args)
-                {
-                    switch (arg)
-                    {
-                        case "-h":
-                            Error.WriteLine("ParseUserLog [options] paths");
-                            Error.WriteLine("option: -h: print this message");
-                            return;
-                        default:
-                            arg.ParseFile()
-                               .Traverse(stages);
-                            break;
-                    }
-                }
+                var stopwatch = Stopwatch.StartNew();
+                args.ForEach(stages.ParseFolderOrFile);
                 stages.MergeStages()
                       .DumpStages();
+                stopwatch.Stop();
+                Error.WriteLine($@"Total time: {stopwatch.Elapsed:hh\:mm\:ss}");
             }
             catch (Exception ex)
             {
                 Error.WriteLine(ex.Message);
                 Error.WriteLine(ex.StackTrace);
+            }
+        }
+
+        static void ParseFolderOrFile(this IDictionary<int, List<Stage>> stages, string path)
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.GetFiles(path)
+                         .ForEach(stages.ParseFolderOrFile);
+                Directory.GetDirectories(path)
+                         .ForEach(stages.ParseFolderOrFile);
+            }
+            else if (File.Exists(path))
+            {
+                if (LogFileNamePattern.IsMatch(path) && new FileInfo(path).Length > 0)
+                {
+                    path.ParseFile()
+                        .Traverse(stages);
+                }
+            }
+            else
+            {
+                Error.WriteLine($"*** Neither a folder nor a file: {path}");
             }
         }
 
@@ -78,6 +92,11 @@ namespace ParseUserLog
                         result[DateTime.Parse(match.Groups["time"].Value)] = record;
                     }
                 }
+            }
+            if (result.Count == 0)
+            {
+                Error.WriteLine("    Deleting the file because it contains no useful data");
+                File.Delete(path);
             }
             return result;
         }
@@ -204,6 +223,10 @@ namespace ParseUserLog
             stages.FirstOrDefault(stage => stage.cards == cards && stage.board == board && stage.action == action);
 
         static Regex AsPattern(this string value) => new Regex(value, Compiled | CultureInvariant | IgnoreCase | IgnorePatternWhitespace | Multiline);
+
+        public static void ForEach<T>(this IEnumerable<T> collection, Action<T> action) =>
+            collection?.ToList()
+                       .ForEach(action);
 
         static string[] SortCards(this string[] cards) => cards?.OrderBy(card => card)
                                                                 .ToArray() ?? new string[0];
@@ -364,6 +387,7 @@ namespace ParseUserLog
                                                \s*>>> \s+ event \s+ (?<event> \w+) \s+ >>> \s+ # event  token
                                                (?<json> .+ )                                   # event content, should be a JSON structure
                                                \Z".AsPattern();
+        static readonly Regex LogFileNamePattern = @"\.log (\.\d+)? \Z".AsPattern();
 
         #endregion Data fields
     }

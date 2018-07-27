@@ -54,10 +54,18 @@ namespace ParseUserLog
             }
             else if (File.Exists(path))
             {
-                if (LogFileNamePattern.IsMatch(path) && new FileInfo(path).Length > 0)
+                if (LogFileNamePattern.IsMatch(path))
                 {
-                    path.ParseFile()
-                        .Traverse(stages);
+                    if (new FileInfo(path).Length == 0)
+                    {
+                        Error.WriteLine($"*** Deleting empty file {path}");
+                        File.Delete(path);
+                    }
+                    else
+                    {
+                        path.ParseFile()
+                            .Traverse(stages);
+                    }
                 }
             }
             else
@@ -103,6 +111,11 @@ namespace ParseUserLog
 
         static void Traverse(this IDictionary<DateTime, Record> records, IDictionary<int, List<Stage>> stages)
         {
+            if (records.Count == 0)
+            {
+                return;
+            }
+
             Error.WriteLine("*** traversing");
 
             var endResults = records.GetGameOverResults();

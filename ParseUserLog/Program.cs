@@ -28,34 +28,22 @@ namespace ParseUserLog
             };
             try
             {
-                bool toMerge = true;
                 foreach (string arg in args)
                 {
                     switch (arg)
                     {
                         case "-h":
                             Error.WriteLine("ParseUserLog [options] paths");
-                            Error.WriteLine("-h: print this message");
-                            Error.WriteLine("-m: no merging");
+                            Error.WriteLine("option: -h: print this message");
                             return;
-                        case "-m":
-                            toMerge = false;
-                            break;
                         default:
                             arg.ParseFile()
                                .Traverse(stages);
                             break;
                     }
                 }
-                if (toMerge)
-                {
-                    stages.MergeStages()
-                          .DumpStages();
-                }
-                else
-                {
-                    stages.DumpStages();
-                }
+                stages.MergeStages()
+                      .DumpStages();
             }
             catch (Exception ex)
             {
@@ -107,33 +95,12 @@ namespace ParseUserLog
                                  orderby pair.Key
                                  select pair)
             {
-                var time = pair.Key;
                 var data = pair.Value.data;
                 var player = data.CurrentPlayer;
-                int? result = endResults.FindResultChips(time, tableNumber: data.table.tableNumber, playerName: player?.playerName);
-                if (result.HasValue)
+                var rank = endResults.FindWinnerRank(time: pair.Key, tableNumber: data.table.tableNumber, playerName: player?.playerName);
+                if (rank.HasValue)
                 {
-                    string cards = player.Cards;
-                    string board = data.table.Board;
-                    var stage = stages[data.table.board.Length].FindSameStage(cards, board, data.action.action);
-                    if (stage == null)
-                    {
-                        stages[data.table.board.Length].Add(
-                            new Stage
-                            {
-                                cards = cards,
-                                board = board,
-                                action = data.action.action,
-                                result = result.Value - player.chips,
-                                count = 1,
-                            }
-                        );
-                    }
-                    else
-                    {
-                        stage.result += result.Value - player.chips;
-                        stage.count++;
-                    }
+                    stages.UpdateStages(player.Cards, data.table.Board, data.table.board.Length, data.action.action, rank.Value);
                 }
                 i++;
                 int p = i * 100 / total;
@@ -146,6 +113,29 @@ namespace ParseUserLog
             Error.WriteLine();
         }
 
+        static void UpdateStages(this IDictionary<int, List<Stage>> stages, string cards, string board, int boardLength, string action, double rank)
+        {
+            var stage = stages[boardLength].FindSameStage(cards, board, action);
+            if (stage == null)
+            {
+                stages[boardLength].Add(
+                    new Stage
+                    {
+                        cards = cards,
+                        board = board,
+                        action = action,
+                        rank = rank,
+                        count = 1,
+                    }
+                );
+            }
+            else
+            {
+                stage.rank += rank;
+                stage.count++;
+            }
+        }
+
         static IDictionary<int, List<Stage>> MergeStages(this IDictionary<int, List<Stage>> stages)
         {
             Error.WriteLine("*** merging");
@@ -155,10 +145,7 @@ namespace ParseUserLog
             {
                 var buffer = new List<Stage>();
                 Stage last = null;
-                foreach (var stage in from stage in pair.Value
-                                      where stage.AverageResult >= 0
-                                      orderby stage.Order
-                                      select stage)
+                foreach (var stage in pair.Value.OrderBy(stage => stage.Order))
                 {
                     if (last == null)
                     {
@@ -169,7 +156,7 @@ namespace ParseUserLog
                         buffer.Add(last);
                         last = stage;
                     }
-                    else if (last.AverageResult < stage.AverageResult)
+                    else if (last.AverageRank < stage.AverageRank)
                     {
                         last = stage;
                     }
@@ -186,14 +173,12 @@ namespace ParseUserLog
         static void DumpStages(this IDictionary<int, List<Stage>> stages)
         {
             Error.WriteLine("*** dumping");
+            WriteLine("Cards,Board,Action,AverageRank,Count");
             foreach (var pair in stages)
             {
-                WriteLine($"======== {pair.Key} ========");
-                foreach (var stage in from stage in pair.Value
-                                      orderby stage.Order
-                                      select stage)
+                foreach (var stage in pair.Value.OrderBy(stage => stage.Order))
                 {
-                    WriteLine($"cards: [{stage.cards}], board: [{stage.board}], action: {stage.action}, AverageResult: {stage.AverageResult} ({stage.count})");
+                    WriteLine($"\"{stage.cards}\",\"{stage.board}\",{stage.action},{stage.AverageRank},{stage.count}");
                 }
             }
         }
@@ -207,14 +192,13 @@ namespace ParseUserLog
                 elementSelector: pair => pair.Value
             );
 
-        static int? FindResultChips(this IDictionary<DateTime, Record> endResults, DateTime time, int tableNumber, string playerName) =>
-            (
-                from pair in endResults
-                where pair.Key > time && pair.Value.data.SamePlayerInSameTable(tableNumber, playerName)
-                orderby pair.Key
-                select pair.Value.data
+        static double? FindWinnerRank(this IDictionary<DateTime, Record> endResults, DateTime time, int tableNumber, string playerName) =>
+            (from pair in endResults
+             where pair.Key > time && pair.Value.data.PlayerInTableWinners(tableNumber, playerName)
+             orderby pair.Key
+             select pair.Value.data
             ).FirstOrDefault()
-            ?.FindPlayer(playerName)?.chips;
+            ?.FindWinner(playerName)?.hand?.rank;
 
         static Stage FindSameStage(this List<Stage> stages, string cards, string board, string action) =>
             stages.FirstOrDefault(stage => stage.cards == cards && stage.board == board && stage.action == action);
@@ -250,11 +234,13 @@ namespace ParseUserLog
             [DataMember] public Player[] players = null;
             [DataMember] public Table table = null;
             [DataMember] public Action action = null;
+            [DataMember] public Winner[] winners = null;
 
-            public bool SamePlayerInSameTable(int tableNumber, string playerName) => table.tableNumber == tableNumber && players.Any(player => player.playerName == playerName);
-            public Player FindPlayer(string playerName) => players.FirstOrDefault(player => player.playerName == playerName);
+            public bool PlayerInTableWinners(int tableNumber, string playerName) => tableNumber == table?.tableNumber && FindWinner(playerName) != null;
+            public Player FindPlayer(string playerName) => players?.FirstOrDefault(player => player.playerName == playerName);
+            public Winner FindWinner(string playerName) => winners?.FirstOrDefault(winner => winner.playerName == playerName);
 
-            public Player CurrentPlayer => players?.FirstOrDefault(player => player.playerName == action?.playerName);
+            public Player CurrentPlayer => FindPlayer(action?.playerName);
 
             public bool Canonicalize()
             {
@@ -283,7 +269,7 @@ namespace ParseUserLog
             public bool Canonicalize()
             {
                 Cards = Join(",", cards.SortCards());
-                return Cards.Length == 5;
+                return Cards.Length == 5; // expecting "XX,YY"
             }
         }
 
@@ -327,15 +313,31 @@ namespace ParseUserLog
             [DataMember] public int chips = 0;
         }
 
+        [DataContract]
+        public class Winner
+        {
+            [DataMember] public string playerName = null;
+            [DataMember] public Hand hand = null;
+            [DataMember] public int chips = 0;
+        }
+
+        [DataContract]
+        public class Hand
+        {
+            [DataMember] public string[] cards = null;
+            [DataMember] public double rank = 0.0;
+            [DataMember] public string message = null;
+        }
+
         public class Stage
         {
             public string cards;
             public string board;
             public string action;
-            public int result;
+            public double rank;
             public int count;
 
-            public int AverageResult => result / count;
+            public double AverageRank => rank / count;
             public string AllCards => cards + ";" + board;
             public string Order => AllCards + ";" + action;
         }

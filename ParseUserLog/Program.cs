@@ -129,11 +129,31 @@ namespace ParseUserLog
             {
                 var data = pair.Value.data;
                 var player = data.CurrentPlayer;
-                var rank = endResults.FindWinnerRank(time: pair.Key, tableNumber: data.table.tableNumber, playerName: player?.playerName);
-                if (rank.HasValue)
+
+                void UpdateRank(double rank)
                 {
-                    stages.UpdateStages(player.Cards, data.table.Board, data.table.board.Length, data.action.action, rank.Value);
+                    var stage = stages[data.table.board.Length].FindSameStage(player.Cards, data.table.Board, data.action.action);
+                    if (stage == null)
+                    {
+                        stages[data.table.board.Length].Add(
+                            new Stage
+                            {
+                                cards = player.Cards,
+                                board = data.table.Board,
+                                action = data.action.action,
+                                rank = rank,
+                                count = 1,
+                            }
+                        );
+                    }
+                    else
+                    {
+                        stage.rank += rank;
+                        stage.count++;
+                    }
                 }
+
+                endResults.UpdateWinnerRank(time: pair.Key, table: data.table, playerName: player?.playerName, updateRank: UpdateRank);
                 i++;
                 int p = i * 100 / total;
                 if (p > percent)
@@ -143,29 +163,6 @@ namespace ParseUserLog
                 }
             }
             Error.WriteLine();
-        }
-
-        static void UpdateStages(this IDictionary<int, List<Stage>> stages, string cards, string board, int boardLength, string action, double rank)
-        {
-            var stage = stages[boardLength].FindSameStage(cards, board, action);
-            if (stage == null)
-            {
-                stages[boardLength].Add(
-                    new Stage
-                    {
-                        cards = cards,
-                        board = board,
-                        action = action,
-                        rank = rank,
-                        count = 1,
-                    }
-                );
-            }
-            else
-            {
-                stage.rank += rank;
-                stage.count++;
-            }
         }
 
         static IDictionary<int, List<Stage>> MergeStages(this IDictionary<int, List<Stage>> stages)
@@ -224,13 +221,20 @@ namespace ParseUserLog
                 elementSelector: pair => pair.Value
             );
 
-        static double? FindWinnerRank(this IDictionary<DateTime, Record> endResults, DateTime time, int tableNumber, string playerName) =>
-            (from pair in endResults
-             where pair.Key > time && pair.Value.data.PlayerInTableWinners(tableNumber, playerName)
-             orderby pair.Key
-             select pair.Value.data
-            ).FirstOrDefault()
-            ?.FindWinner(playerName)?.hand?.rank;
+        static void UpdateWinnerRank(this IDictionary<DateTime, Record> endResults, DateTime time, Table table, string playerName, Action<double> updateRank)
+        {
+            var winner = (from pair in endResults
+                          orderby pair.Key
+                          let data = pair.Value.data
+                          where pair.Key > time && data.table.Same(table) && data.FindPlayer(playerName) != null
+                          select data
+                         ).FirstOrDefault()
+                         ?.FindWinner(playerName);
+            if (winner != null)
+            {
+                updateRank(winner.hand.rank);
+            }
+        }
 
         static Stage FindSameStage(this List<Stage> stages, string cards, string board, string action) =>
             stages.FirstOrDefault(stage => stage.cards == cards && stage.board == board && stage.action == action);
@@ -272,7 +276,6 @@ namespace ParseUserLog
             [DataMember] public Action action = null;
             [DataMember] public Winner[] winners = null;
 
-            public bool PlayerInTableWinners(int tableNumber, string playerName) => tableNumber == table?.tableNumber && FindWinner(playerName) != null;
             public Player FindPlayer(string playerName) => players?.FirstOrDefault(player => player.playerName == playerName);
             public Winner FindWinner(string playerName) => winners?.FirstOrDefault(winner => winner.playerName == playerName);
 
@@ -331,6 +334,8 @@ namespace ParseUserLog
             {
                 Board = Join(",", board.SortCards());
             }
+
+            public bool Same(Table other) => tableNumber == other.tableNumber && smallBlind.playerName == other.smallBlind.playerName && bigBlind.playerName == other.bigBlind.playerName;
         }
 
         [DataContract]

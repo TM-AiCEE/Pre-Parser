@@ -34,7 +34,7 @@ namespace ParseUserLog
         [DataMember] public int raiseCount = 0;
         [DataMember] public int betCount = 0;
         [DataMember] public int totalBet = 0;
-        [DataMember] public int initChrips = 0;
+        [DataMember] public int initChips = 0;
         [DataMember] public int maxReloadCount = 0;
         [DataMember] public Blind smallBlind = null;
         [DataMember] public Blind bigBlind = null;

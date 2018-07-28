@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Data.SqlClient;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -9,6 +10,8 @@ namespace ParseUserLog
 {
     using static RegexOptions;
     using static Console;
+    using Records = Dictionary<DateTime, Record>;
+    using Stages = Dictionary<int, List<Stage>>;
 
     static class Program
     {
@@ -16,7 +19,7 @@ namespace ParseUserLog
 
         static void Main(string[] args)
         {
-            IDictionary<int, List<Stage>> stages = new Dictionary<int, List<Stage>>
+            var stages = new Stages
             {
                 [0] = new List<Stage>(),
                 [3] = new List<Stage>(),
@@ -26,9 +29,13 @@ namespace ParseUserLog
             try
             {
                 var stopwatch = Stopwatch.StartNew();
-                args.ForEach(stages.ParseFolderOrFile);
-                stages.MergeStages()
-                      .DumpStages();
+                using (var connection = new SqlConnection(@"Server=localhost\SQLEXPRESS;Database=TEXASLOG;Trusted_Connection=True;"))
+                {
+                    connection.Open();
+                    args.ForEach(arg => stages.ParseFolderOrFile(arg, connection));
+                    stages.MergeStages()
+                          .DumpStages();
+                }
                 stopwatch.Stop();
                 Error.WriteLine($@"Total time: {stopwatch.Elapsed:hh\:mm\:ss}");
             }
@@ -39,14 +46,14 @@ namespace ParseUserLog
             }
         }
 
-        static void ParseFolderOrFile(this IDictionary<int, List<Stage>> stages, string path)
+        static void ParseFolderOrFile(this Stages stages, string path, SqlConnection connection)
         {
             if (Directory.Exists(path))
             {
                 Directory.GetFiles(path)
-                         .ForEach(stages.ParseFolderOrFile);
+                         .ForEach(filePath => stages.ParseFolderOrFile(filePath, connection));
                 Directory.GetDirectories(path)
-                         .ForEach(stages.ParseFolderOrFile);
+                         .ForEach(subdir => stages.ParseFolderOrFile(subdir, connection));
             }
             else if (File.Exists(path))
             {
@@ -59,7 +66,7 @@ namespace ParseUserLog
                     }
                     else
                     {
-                        path.ParseFile()
+                        path.ParseFile(connection)
                             .Traverse(stages);
                     }
                 }
@@ -70,11 +77,12 @@ namespace ParseUserLog
             }
         }
 
-        static IDictionary<DateTime, Record> ParseFile(this string path)
+        static (Records, Records) ParseFile(this string path, SqlConnection connection)
         {
             Error.WriteLine($"*** parsing {path}");
 
-            var result = new Dictionary<DateTime, Record>();
+            var showActionResult = new Records();
+            var gameOverResult = new Records();
             string line;
             using (var file = new StreamReader(path))
             {
@@ -86,42 +94,47 @@ namespace ParseUserLog
                         continue;
                     }
                     var match2 = EventPattern.Match(match.Groups["message"].Value);
-                    if (!match2.Success)
+                    if (!match2.Success || !new[] { "SHOW_ACTION", "GAME_OVER" }.Contains(match2.Groups["event"].Value))
                     {
                         continue;
                     }
                     var record = Record.Parse(match2.Groups["json"].Value);
                     if (record != null && record.data.Canonicalize())
                     {
-                        result[DateTime.Parse(match.Groups["time"].Value)] = record;
+                        switch (match2.Groups["event"].Value)
+                        {
+                            case "SHOW_ACTION":
+                                showActionResult[DateTime.Parse(match.Groups["time"].Value)] = record;
+                                break;
+                            case "GAME_OVER":
+                                gameOverResult[DateTime.Parse(match.Groups["time"].Value)] = record;
+                                break;
+                        }
                     }
                 }
             }
-            if (result.Count == 0)
+            if (showActionResult.Count == 0 && gameOverResult.Count == 0)
             {
                 Error.WriteLine("    Deleting the file because it contains no useful data");
                 File.Delete(path);
             }
-            return result;
+            return (showActionResult, gameOverResult);
         }
 
-        static void Traverse(this IDictionary<DateTime, Record> records, IDictionary<int, List<Stage>> stages)
+        static void Traverse(this (Records, Records) parseResult, Stages stages)
         {
-            if (records.Count == 0)
+            var (showActionRecords, gameOverRecords) = parseResult;
+            if (showActionRecords.Count == 0 || gameOverRecords.Count == 0)
             {
                 return;
             }
 
             Error.WriteLine("*** traversing");
 
-            var endResults = records.GetGameOverResults();
-            int total = records.Count(pair => pair.Value.eventName == EventShowAction);
+            int total = showActionRecords.Count;
             int i = 0;
             int percent = 0;
-            foreach (var pair in from pair in records
-                                 where pair.Value.eventName == EventShowAction
-                                 orderby pair.Key
-                                 select pair)
+            foreach (var pair in showActionRecords.OrderBy(pair => pair.Key))
             {
                 var data = pair.Value.data;
                 var player = data.CurrentPlayer;
@@ -149,7 +162,7 @@ namespace ParseUserLog
                     }
                 }
 
-                endResults.UpdateWinnerRank(time: pair.Key, table: data.table, playerName: player?.playerName, updateRank: UpdateRank);
+                gameOverRecords.UpdateWinnerRank(time: pair.Key, table: data.table, playerName: player?.playerName, updateRank: UpdateRank);
                 i++;
                 int p = i * 100 / total;
                 if (p > percent)
@@ -161,11 +174,11 @@ namespace ParseUserLog
             Error.WriteLine();
         }
 
-        static IDictionary<int, List<Stage>> MergeStages(this IDictionary<int, List<Stage>> stages)
+        static Stages MergeStages(this Stages stages)
         {
             Error.WriteLine("*** merging");
 
-            var result = new Dictionary<int, List<Stage>>();
+            var result = new Stages();
             foreach (var pair in stages)
             {
                 var buffer = new List<Stage>();
@@ -195,9 +208,10 @@ namespace ParseUserLog
             return result;
         }
 
-        static void DumpStages(this IDictionary<int, List<Stage>> stages)
+        static void DumpStages(this Stages stages)
         {
             Error.WriteLine("*** dumping");
+
             WriteLine("Cards,Board,Action,AverageRank,Count");
             foreach (var pair in stages)
             {
@@ -208,18 +222,9 @@ namespace ParseUserLog
             }
         }
 
-        static IDictionary<DateTime, Record> GetGameOverResults(this IDictionary<DateTime, Record> records) =>
-            (from pair in records
-             where pair.Value.eventName == EventGameOver
-             select pair
-            ).ToDictionary(
-                keySelector: pair => pair.Key,
-                elementSelector: pair => pair.Value
-            );
-
-        static void UpdateWinnerRank(this IDictionary<DateTime, Record> endResults, DateTime time, Table table, string playerName, Action<double> updateRank)
+        static void UpdateWinnerRank(this Records gameOverRecords, DateTime time, Table table, string playerName, Action<double> updateRank)
         {
-            var winner = (from pair in endResults
+            var winner = (from pair in gameOverRecords
                           orderby pair.Key
                           let data = pair.Value.data
                           where pair.Key > time && data.table.Same(table) && data.FindPlayer(playerName) != null
@@ -244,14 +249,12 @@ namespace ParseUserLog
         public static string[] SortCards(this string[] cards) => cards?.OrderBy(card => card)
                                                                        .ToArray() ?? new string[0];
 
+        public static bool IsDBNull(this object value) => value == null || value == DBNull.Value;
+
         #endregion Methods
 
 
         #region Data fiedls
-
-        const string EventShowAction = "__show_action";
-        const string EventRoundEnd = "__round_end";
-        const string EventGameOver = "__game_over";
 
         static readonly Regex LinePattern = @"\A
                                               \[ (?<time> \d{4}-\d{2}-\d{2} T \d{2}:\d{2}:\d{2} \. \d{3} ) \] \s+ # time
@@ -263,7 +266,7 @@ namespace ParseUserLog
                                               (?<message> .+ )                                                    # message
                                               \Z".AsPattern();
         static readonly Regex EventPattern = @"\A
-                                               \s*>>> \s+ event \s+ (?<event> \w+) \s+ >>> \s+ # event  token
+                                               \s*>>> \s+ event \s+ (?<event> \w+) \s+ >>> \s+ # event token
                                                (?<json> .+ )                                   # event content, should be a JSON structure
                                                \Z".AsPattern();
         static readonly Regex LogFileNamePattern = @"\.log (\.\d+)? \Z".AsPattern();

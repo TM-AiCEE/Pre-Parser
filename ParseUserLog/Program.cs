@@ -3,16 +3,12 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Runtime.Serialization;
-using System.Runtime.Serialization.Json;
-using System.Text;
 using System.Text.RegularExpressions;
 
 namespace ParseUserLog
 {
     using static RegexOptions;
     using static Console;
-    using static String;
 
     static class Program
     {
@@ -241,149 +237,14 @@ namespace ParseUserLog
 
         static Regex AsPattern(this string value) => new Regex(value, Compiled | CultureInvariant | IgnoreCase | IgnorePatternWhitespace | Multiline);
 
-        public static void ForEach<T>(this IEnumerable<T> collection, Action<T> action) =>
+        static void ForEach<T>(this IEnumerable<T> collection, Action<T> action) =>
             collection?.ToList()
                        .ForEach(action);
 
-        static string[] SortCards(this string[] cards) => cards?.OrderBy(card => card)
-                                                                .ToArray() ?? new string[0];
+        public static string[] SortCards(this string[] cards) => cards?.OrderBy(card => card)
+                                                                       .ToArray() ?? new string[0];
 
         #endregion Methods
-
-
-        #region Nested types
-
-        [DataContract]
-        public class Record
-        {
-            [DataMember] public string eventName = null;
-            [DataMember] public Data data = null;
-
-            public static Record Parse(string json)
-            {
-                using (var stream = new MemoryStream(Encoding.UTF8.GetBytes(json)))
-                {
-                    return new DataContractJsonSerializer(typeof(Record)).ReadObject(stream) as Record;
-                }
-            }
-        }
-
-        [DataContract]
-        public class Data
-        {
-            [DataMember] public Player[] players = null;
-            [DataMember] public Table table = null;
-            [DataMember] public Action action = null;
-            [DataMember] public Winner[] winners = null;
-
-            public Player FindPlayer(string playerName) => players?.FirstOrDefault(player => player.playerName == playerName);
-            public Winner FindWinner(string playerName) => winners?.FirstOrDefault(winner => winner.playerName == playerName);
-
-            public Player CurrentPlayer => FindPlayer(action?.playerName);
-
-            public bool Canonicalize()
-            {
-                table?.Canonicalize();
-                return players?.All(player => player.Canonicalize()) == true;
-            }
-        }
-
-        [DataContract]
-        public class Player
-        {
-            [DataMember] public string playerName = null;
-            [DataMember] public int chips = 0;
-            [DataMember] public bool folded = false;
-            [DataMember] public bool allIn = false;
-            [DataMember] public string[] cards = null;
-            [DataMember] public bool isSurvive = false;
-            [DataMember] public int reloadCount = 0;
-            [DataMember] public int roundBet = 0;
-            [DataMember] public int bet = 0;
-            [DataMember] public bool isOnline = false;
-            [DataMember] public bool isHuman = false;
-
-            public string Cards = null;
-
-            public bool Canonicalize()
-            {
-                Cards = Join(",", cards.SortCards());
-                return Cards.Length == 5; // expecting "XX,YY"
-            }
-        }
-
-        [DataContract]
-        public class Table
-        {
-            [DataMember] public int tableNumber = 0;
-            [DataMember] public int status = 0;
-            [DataMember] public string roundName = null;
-            [DataMember] public string[] board = null; // 0,3,4,5
-            [DataMember] public int roundCount = 0;
-            [DataMember] public int raiseCount = 0;
-            [DataMember] public int betCount = 0;
-            [DataMember] public int totalBet = 0;
-            [DataMember] public int initChips = 0;
-            [DataMember] public int maxReloadCount = 0;
-            [DataMember] public Blind smallBlind = null;
-            [DataMember] public Blind bigBlind = null;
-
-            public string Board = null;
-
-            public void Canonicalize()
-            {
-                Board = Join(",", board.SortCards());
-            }
-
-            public bool Same(Table other) => tableNumber == other.tableNumber && smallBlind.playerName == other.smallBlind.playerName && bigBlind.playerName == other.bigBlind.playerName;
-        }
-
-        [DataContract]
-        public class Blind
-        {
-            [DataMember] public string playerName = null;
-            [DataMember] public int amount = 0;
-        }
-
-        [DataContract]
-        public class Action
-        {
-            [DataMember] public string action = null;
-            [DataMember] public string playerName = null;
-            [DataMember] public int amount = 0;
-            [DataMember] public int chips = 0;
-        }
-
-        [DataContract]
-        public class Winner
-        {
-            [DataMember] public string playerName = null;
-            [DataMember] public Hand hand = null;
-            [DataMember] public int chips = 0;
-        }
-
-        [DataContract]
-        public class Hand
-        {
-            [DataMember] public string[] cards = null;
-            [DataMember] public double rank = 0.0;
-            [DataMember] public string message = null;
-        }
-
-        public class Stage
-        {
-            public string cards;
-            public string board;
-            public string action;
-            public double rank;
-            public int count;
-
-            public double AverageRank => rank / count;
-            public string AllCards => cards + ";" + board;
-            public string Order => AllCards + ";" + action;
-        }
-
-        #endregion Nested types
 
 
         #region Data fiedls

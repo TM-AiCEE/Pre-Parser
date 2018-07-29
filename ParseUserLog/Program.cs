@@ -11,7 +11,6 @@ namespace ParseUserLog
     using static RegexOptions;
     using static Console;
     using Records = Dictionary<DateTime, Record>;
-    using Stages = Dictionary<int, List<Stage>>;
 
     static class Program
     {
@@ -19,22 +18,18 @@ namespace ParseUserLog
 
         static void Main(string[] args)
         {
-            var stages = new Stages
-            {
-                [0] = new List<Stage>(),
-                [3] = new List<Stage>(),
-                [4] = new List<Stage>(),
-                [5] = new List<Stage>(),
-            };
             try
             {
                 var stopwatch = Stopwatch.StartNew();
                 using (var connection = new SqlConnection(@"Server=localhost\SQLEXPRESS;Database=TEXASLOG;Trusted_Connection=True;"))
                 {
                     connection.Open();
-                    args.ForEach(arg => stages.ParseFolderOrFile(arg, connection));
-                    stages.MergeStages()
-                          .DumpStages();
+                    args.Where(arg => arg[0] != '-')
+                        .ForEach(connection.ParseFolderOrFile);
+                    if (args.Any(arg => arg == "-d"))
+                    {
+                        connection.DumpDigested();
+                    }
                 }
                 stopwatch.Stop();
                 Error.WriteLine($@"Total time: {stopwatch.Elapsed:hh\:mm\:ss}");
@@ -46,14 +41,14 @@ namespace ParseUserLog
             }
         }
 
-        static void ParseFolderOrFile(this Stages stages, string path, SqlConnection connection)
+        static void ParseFolderOrFile(this SqlConnection connection, string path)
         {
             if (Directory.Exists(path))
             {
                 Directory.GetFiles(path)
-                         .ForEach(filePath => stages.ParseFolderOrFile(filePath, connection));
+                         .ForEach(connection.ParseFolderOrFile);
                 Directory.GetDirectories(path)
-                         .ForEach(subdir => stages.ParseFolderOrFile(subdir, connection));
+                         .ForEach(connection.ParseFolderOrFile);
             }
             else if (File.Exists(path))
             {
@@ -66,8 +61,8 @@ namespace ParseUserLog
                     }
                     else
                     {
-                        path.ParseFile(connection)
-                            .Traverse(stages);
+                        path.ParseFile()
+                            .TraverseAndSaveDigested(connection);
                     }
                 }
             }
@@ -77,7 +72,7 @@ namespace ParseUserLog
             }
         }
 
-        static (Records, Records) ParseFile(this string path, SqlConnection connection)
+        static (Records, Records) ParseFile(this string path)
         {
             Error.WriteLine($"*** parsing {path}");
 
@@ -121,7 +116,7 @@ namespace ParseUserLog
             return (showActionResult, gameOverResult);
         }
 
-        static void Traverse(this (Records, Records) parseResult, Stages stages)
+        static void TraverseAndSaveDigested(this (Records, Records) parseResult, SqlConnection connection)
         {
             var (showActionRecords, gameOverRecords) = parseResult;
             if (showActionRecords.Count == 0 || gameOverRecords.Count == 0)
@@ -131,6 +126,15 @@ namespace ParseUserLog
 
             Error.WriteLine("*** traversing");
 
+            Winner FindWinner(DateTime time, Table table, string playerName) =>
+                (from pair in gameOverRecords
+                 orderby pair.Key
+                 let data = pair.Value.data
+                 where pair.Key > time && data.table.Same(table) && data.FindPlayer(playerName) != null
+                 select data
+                ).FirstOrDefault()
+                ?.FindWinner(playerName);
+
             int total = showActionRecords.Count;
             int i = 0;
             int percent = 0;
@@ -138,31 +142,22 @@ namespace ParseUserLog
             {
                 var data = pair.Value.data;
                 var player = data.CurrentPlayer;
-
-                void UpdateRank(double rank)
+                var winner = FindWinner(time: pair.Key, table: data.table, playerName: player?.playerName);
+                if (winner != null)
                 {
-                    var stage = stages[data.table.board.Length].FindSameStage(player.Cards, data.table.Board, data.action.action);
-                    if (stage == null)
+                    using (var command = connection.CreateCommand())
                     {
-                        stages[data.table.board.Length].Add(
-                            new Stage
-                            {
-                                cards = player.Cards,
-                                board = data.table.Board,
-                                action = data.action.action,
-                                rank = rank,
-                                count = 1,
-                            }
-                        );
-                    }
-                    else
-                    {
-                        stage.rank += rank;
-                        stage.count++;
+                        command.CommandText = @"IF NOT EXISTS( SELECT * FROM [DIGESTED] WHERE [TIME] = @time )
+                                                INSERT [DIGESTED] ([TIME], [CARDS], [BOARD], [ACTION], [RANK])
+                                                VALUES (@time, @cards, @board, @action, @rank)";
+                        command.Parameters.AddWithValue("time", pair.Key);
+                        command.Parameters.AddWithValue("cards", player.Cards);
+                        command.Parameters.AddWithValue("board", data.table.Board);
+                        command.Parameters.AddWithValue("action", data.action.action);
+                        command.Parameters.AddWithValue("rank", winner.hand.rank);
+                        command.ExecuteNonQuery();
                     }
                 }
-
-                gameOverRecords.UpdateWinnerRank(time: pair.Key, table: data.table, playerName: player?.playerName, updateRank: UpdateRank);
                 i++;
                 int p = i * 100 / total;
                 if (p > percent)
@@ -174,71 +169,51 @@ namespace ParseUserLog
             Error.WriteLine();
         }
 
-        static Stages MergeStages(this Stages stages)
-        {
-            Error.WriteLine("*** merging");
-
-            var result = new Stages();
-            foreach (var pair in stages)
-            {
-                var buffer = new List<Stage>();
-                Stage last = null;
-                foreach (var stage in pair.Value.OrderBy(stage => stage.Order))
-                {
-                    if (last == null)
-                    {
-                        last = stage;
-                    }
-                    else if (last.AllCards != stage.AllCards)
-                    {
-                        buffer.Add(last);
-                        last = stage;
-                    }
-                    else if (last.AverageRank < stage.AverageRank)
-                    {
-                        last = stage;
-                    }
-                }
-                if (last != null)
-                {
-                    buffer.Add(last);
-                }
-                result[pair.Key] = buffer;
-            }
-            return result;
-        }
-
-        static void DumpStages(this Stages stages)
+        static void DumpDigested(this SqlConnection connection)
         {
             Error.WriteLine("*** dumping");
 
             WriteLine("Cards,Board,Action,AverageRank,Count");
-            foreach (var pair in stages)
+            using (var command = connection.CreateCommand())
             {
-                foreach (var stage in pair.Value.OrderBy(stage => stage.Order))
+                command.CommandText = @"SELECT   [CARDS], [BOARD], [ACTION], [AVG_RANK] = AVG([RANK]), [COUNT] = SUM(1)
+                                        FROM     [DIGESTED]
+                                        GROUP BY [CARDS], [BOARD], [ACTION]
+                                        ORDER BY LEN([BOARD]) ASC, [CARDS] ASC, [BOARD] ASC";
+                using (var reader = command.ExecuteReader())
                 {
-                    WriteLine($"\"{stage.cards}\",\"{stage.board}\",{stage.action},{stage.AverageRank},{stage.count}");
+                    Digested last = null;
+                    while (reader.Read())
+                    {
+                        var digested = new Digested
+                        {
+                            cards = reader["CARDS"] as string,
+                            board = reader["BOARD"] as string,
+                            action = reader["ACTION"] as string,
+                            averageRank = (double)reader["AVG_RANK"],
+                            count = (int)reader["COUNT"],
+                        };
+                        if (last == null)
+                        {
+                            last = digested;
+                        }
+                        else if (last.AllCards != digested.AllCards)
+                        {
+                            WriteLine($"\"{last.cards}\",\"{last.board}\",{last.action},{last.averageRank},{last.count}");
+                            last = digested;
+                        }
+                        else if (last.averageRank < digested.averageRank)
+                        {
+                            last = digested;
+                        }
+                    }
+                    if (last != null)
+                    {
+                        WriteLine($"\"{last.cards}\",\"{last.board}\",{last.action},{last.averageRank},{last.count}");
+                    }
                 }
             }
         }
-
-        static void UpdateWinnerRank(this Records gameOverRecords, DateTime time, Table table, string playerName, Action<double> updateRank)
-        {
-            var winner = (from pair in gameOverRecords
-                          orderby pair.Key
-                          let data = pair.Value.data
-                          where pair.Key > time && data.table.Same(table) && data.FindPlayer(playerName) != null
-                          select data
-                         ).FirstOrDefault()
-                         ?.FindWinner(playerName);
-            if (winner != null)
-            {
-                updateRank(winner.hand.rank);
-            }
-        }
-
-        static Stage FindSameStage(this List<Stage> stages, string cards, string board, string action) =>
-            stages.FirstOrDefault(stage => stage.cards == cards && stage.board == board && stage.action == action);
 
         static Regex AsPattern(this string value) => new Regex(value, Compiled | CultureInvariant | IgnoreCase | IgnorePatternWhitespace | Multiline);
 
@@ -248,8 +223,6 @@ namespace ParseUserLog
 
         public static string[] SortCards(this string[] cards) => cards?.OrderBy(card => card)
                                                                        .ToArray() ?? new string[0];
-
-        public static bool IsDBNull(this object value) => value == null || value == DBNull.Value;
 
         #endregion Methods
 

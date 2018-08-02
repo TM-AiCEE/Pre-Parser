@@ -79,10 +79,12 @@ namespace ParseUserLog
             var showActionResult = new Records();
             var gameOverResult = new Records();
             string line;
+            int ln = 0;
             using (var file = new StreamReader(path))
             {
                 while ((line = file.ReadLine()) != null)
                 {
+                    ln++;
                     var match = LinePattern.Match(line);
                     if (!match.Success || match.Groups["level"].Value != "INFO")
                     {
@@ -93,7 +95,7 @@ namespace ParseUserLog
                     {
                         continue;
                     }
-                    var record = Record.Parse(match2.Groups["json"].Value);
+                    var record = Record.Parse(match2.Groups["json"].Value, path, ln);
                     if (record != null && record.data.Canonicalize())
                     {
                         switch (match2.Groups["event"].Value)
